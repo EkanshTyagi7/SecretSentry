@@ -13,6 +13,20 @@ static AWS_ACCESS_KEY: LazyLock<Regex> =
 static OPENAI_TOKEN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"sk-[A-Za-z0-9]{20,}").expect("OpenAI token pattern"));
 
+static JWT_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+")
+        .expect("JWT token pattern")
+});
+
+static GCP_SERVICE_ACCOUNT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""private_key_id":\s*"[0-9a-f]{40}""#).expect("GCP service account pattern")
+});
+
+static AZURE_STORAGE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"DefaultEndpointsProtocol=https;AccountName=[a-z0-9]+;AccountKey=[A-Za-z0-9+/=]+;EndpointSuffix=core\.windows\.net")
+        .expect("Azure storage pattern")
+});
+
 const ENTROPY_THRESHOLD: f64 = 4.5;
 const MIN_ENTROPY_LEN: usize = 20;
 
@@ -20,6 +34,9 @@ const MIN_ENTROPY_LEN: usize = 20;
 pub enum SecretKind {
     AwsAccessKey,
     OpenAiToken,
+    JwtToken,
+    GcpServiceAccount,
+    AzureStorage,
     HighEntropy,
 }
 
@@ -28,6 +45,9 @@ impl SecretKind {
         match self {
             Self::AwsAccessKey => "AWS_ACCESS_KEY_ID",
             Self::OpenAiToken => "OPENAI_API_KEY",
+            Self::JwtToken => "JWT_TOKEN",
+            Self::GcpServiceAccount => "GCP_PRIVATE_KEY_ID",
+            Self::AzureStorage => "AZURE_STORAGE_CONNECTION_STRING",
             Self::HighEntropy => "HIGH_ENTROPY_SECRET",
         }
     }
@@ -38,6 +58,9 @@ impl std::fmt::Display for SecretKind {
         f.write_str(match self {
             Self::AwsAccessKey => "AWS access key",
             Self::OpenAiToken => "OpenAI token",
+            Self::JwtToken => "JWT token",
+            Self::GcpServiceAccount => "GCP service account key ID",
+            Self::AzureStorage => "Azure storage connection string",
             Self::HighEntropy => "high-entropy string",
         })
     }
@@ -258,10 +281,13 @@ fn detect_line(
     findings
 }
 
-fn known_patterns() -> [(Regex, SecretKind); 2] {
+fn known_patterns() -> [(Regex, SecretKind); 5] {
     [
         (AWS_ACCESS_KEY.clone(), SecretKind::AwsAccessKey),
         (OPENAI_TOKEN.clone(), SecretKind::OpenAiToken),
+        (JWT_TOKEN.clone(), SecretKind::JwtToken),
+        (GCP_SERVICE_ACCOUNT.clone(), SecretKind::GcpServiceAccount),
+        (AZURE_STORAGE.clone(), SecretKind::AzureStorage),
     ]
 }
 

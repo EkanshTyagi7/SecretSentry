@@ -10,7 +10,10 @@ use crate::scanner::{self, ScanOptions};
 
 const AWS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
 const OPENAI_TOKEN: &str = "sk-testOpenAIToken1234567890abcd";
+const JWT_TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0ODc5MjEwMyIsInJvbGUiOiJhZG1pbiIsImlhdCI6MTcwMDAwMDAwMH0.9kL2mxP8vQ1nR4wT7yU0iO3pA5sD7fG9hJ1kL3zX8cV";
 const HIGH_ENTROPY: &str = "q7W9mZ2kP4nR8xL1vC6bH3jF5sD0aYgT";
+const GCP_SA_KEY: &str = "\"private_key_id\": \"1234567890abcdef1234567890abcdef12345678\"";
+const AZURE_CONN: &str = "DefaultEndpointsProtocol=https;AccountName=testacc;AccountKey=SuperSecretKey123+/=;EndpointSuffix=core.windows.net";
 const IGNORED_KEY: &str = "AKIAIGNOREDSHOULD001";
 const TARGET_KEY: &str = "AKIABUILDDIRSHOULD01";
 const NODE_MODULES_KEY: &str = "AKIANODEMODULES00001";
@@ -235,6 +238,9 @@ fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
             for (key, value) in [
                 ("AWS_ACCESS_KEY_ID", AWS_KEY),
                 ("OPENAI_API_KEY", OPENAI_TOKEN),
+                ("JWT_TOKEN", JWT_TOKEN),
+                ("GCP_PRIVATE_KEY_ID", GCP_SA_KEY),
+                ("AZURE_STORAGE_CONNECTION_STRING", AZURE_CONN),
                 ("HIGH_ENTROPY_SECRET", HIGH_ENTROPY),
             ] {
                 let expected = format!("{key}={value}");
@@ -248,7 +254,7 @@ fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
             record(
                 &mut checks,
                 ".env has one entry per distinct secret",
-                entries.len() == 3,
+                entries.len() == 6,
                 &format!("found {} entries", entries.len()),
             );
         }
@@ -387,6 +393,9 @@ fn javascript_source() -> String {
         "\
 const awsAccessKey = \"{AWS_KEY}\";
 const openaiToken = \"{OPENAI_TOKEN}\";
+const jwtToken = \"{JWT_TOKEN}\";
+const gcpKey = '{GCP_SA_KEY}';
+const azureConn = \"{AZURE_CONN}\";
 const highEntropy = \"{HIGH_ENTROPY}\";
 "
     )
@@ -396,6 +405,9 @@ fn javascript_expected() -> String {
     "\
 const awsAccessKey = process.env.AWS_ACCESS_KEY_ID;
 const openaiToken = process.env.OPENAI_API_KEY;
+const jwtToken = process.env.JWT_TOKEN;
+const gcpKey = process.env.GCP_PRIVATE_KEY_ID;
+const azureConn = process.env.AZURE_STORAGE_CONNECTION_STRING;
 const highEntropy = process.env.HIGH_ENTROPY_SECRET;
 "
     .to_string()
