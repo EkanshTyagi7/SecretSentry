@@ -1,0 +1,10 @@
+[package]
+name = "secretsentry"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rayon = "1.10"
+walkdir = "2.5"
+ignore = "0.4"
+regex = "1.10"
