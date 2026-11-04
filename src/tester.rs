@@ -145,6 +145,30 @@ fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
             return Err(failure(checks));
         }
     };
+    let dry_run_report = match remediator::remediate_with_options(root, &findings, true) {
+        Ok(report) => report,
+        Err(err) => {
+            checks.push(Check {
+                name: "dry run completed".to_string(),
+                passed: false,
+                detail: err.to_string(),
+            });
+            return Err(failure(checks));
+        }
+    };
+    record(
+        &mut checks,
+        "dry run did not create .env",
+        !root.join(".env").exists(),
+        ".env was created during dry run",
+    );
+    record(
+        &mut checks,
+        "dry run predicted rewritten files accurately",
+        dry_run_report.files_rewritten == 4,
+        &format!("predicted {}", dry_run_report.files_rewritten),
+    );
+
     let report = match remediator::remediate(root, &findings) {
         Ok(report) => report,
         Err(err) => {

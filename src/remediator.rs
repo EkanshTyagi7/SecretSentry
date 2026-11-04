@@ -54,11 +54,21 @@ impl std::fmt::Display for RemediateError {
 
 impl std::error::Error for RemediateError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedAction {
+    pub path: PathBuf,
+    pub line_number: usize,
+    pub env_key: String,
+    pub replacement: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct RemediationReport {
     pub env_path: PathBuf,
     pub env_keys_written: usize,
     pub files_rewritten: usize,
+    pub dry_run: bool,
+    pub planned_actions: Vec<PlannedAction>,
 }
 
 struct Planned {
@@ -101,21 +111,104 @@ impl EnvWriter {
 
 /// Rewrite supported literals and append each distinct secret to `root/.env`.
 pub fn remediate(root: &Path, findings: &[Finding]) -> Result<RemediationReport, RemediateError> {
+    remediate_with_options(root, findings, false)
+}
+
+/// Remediate findings with custom options (such as dry-run).
+pub fn remediate_with_options(
+    root: &Path,
+    findings: &[Finding],
+    dry_run: bool,
+) -> Result<RemediationReport, RemediateError> {
     let env_path = root.join(".env");
+    let planned = plan(findings);
+    let planned_actions: Vec<PlannedAction> = planned
+        .iter()
+        .map(|item| PlannedAction {
+            path: item.path.clone(),
+            line_number: item.line_number,
+            env_key: item.env_key.clone(),
+            replacement: item.replacement.clone(),
+        })
+        .collect();
+
     if findings.is_empty() {
         return Ok(RemediationReport {
             env_path,
             env_keys_written: 0,
             files_rewritten: 0,
+            dry_run,
+            planned_actions,
         });
     }
 
-    let planned = plan(findings);
     let mut grouped: BTreeMap<PathBuf, Vec<Planned>> = BTreeMap::new();
     for item in planned {
         grouped.entry(item.path.clone()).or_default().push(item);
     }
     let groups: Vec<(PathBuf, Vec<Planned>)> = grouped.into_iter().collect();
+
+    if dry_run {
+        let seen: HashSet<String> = if env_path.exists() {
+            fs::read_to_string(&env_path)
+                .map_err(|source| RemediateError::Io {
+                    path: env_path.clone(),
+                    source,
+                })?
+                .lines()
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(str::to_string)
+                .collect()
+        } else {
+            HashSet::new()
+        };
+
+        let mut already_seen = seen;
+        let mut would_write_keys = 0;
+        for action in &planned_actions {
+            if action.env_key.contains(['\n', '\r', '=']) {
+                return Err(RemediateError::UnsafeEnvEntry {
+                    key: action.env_key.clone(),
+                });
+            }
+            if let Some(finding) = findings
+                .iter()
+                .find(|f| f.path == action.path && f.line_number == action.line_number)
+            {
+                if finding.value.contains(['\n', '\r']) {
+                    return Err(RemediateError::UnsafeEnvEntry {
+                        key: action.env_key.clone(),
+                    });
+                }
+                let entry = format!("{}={}", action.env_key, finding.value);
+                if already_seen.insert(entry) {
+                    would_write_keys += 1;
+                }
+            }
+        }
+
+        let mut files_to_rewrite = 0;
+        for (path, edits) in &groups {
+            if edits.iter().any(|edit| edit.replacement.is_some()) {
+                let source = fs::read_to_string(path).map_err(|source| RemediateError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                let updated = apply_edits(path, &source, edits)?;
+                if updated != source {
+                    files_to_rewrite += 1;
+                }
+            }
+        }
+
+        return Ok(RemediationReport {
+            env_path,
+            env_keys_written: would_write_keys,
+            files_rewritten: files_to_rewrite,
+            dry_run: true,
+            planned_actions,
+        });
+    }
 
     let writer = Mutex::new(open_env(&env_path)?);
     let rewritten = groups
@@ -135,10 +228,13 @@ pub fn remediate(root: &Path, findings: &[Finding]) -> Result<RemediationReport,
         env_path,
         env_keys_written,
         files_rewritten: rewritten,
+        dry_run: false,
+        planned_actions,
     })
 }
 
 /// Rewrite `source` the same way file remediation would, without touching disk.
+#[allow(dead_code)]
 pub fn rewrite_text(
     path: &Path,
     source: &str,
@@ -421,5 +517,30 @@ settings = {
 }
 "
         );
+    }
+
+    #[test]
+    fn dry_run_does_not_modify_disk() {
+        let temp_dir = std::env::temp_dir().join("secretsentry_dry_run_test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = temp_dir.join("sample.py");
+        let original_content = "aws_key = \"AKIAIOSFODNN7EXAMPLE\"\n";
+        fs::write(&file_path, original_content).unwrap();
+
+        let findings = detect_text(&file_path, original_content);
+        let report = remediate_with_options(&temp_dir, &findings, true).unwrap();
+
+        assert!(report.dry_run);
+        assert_eq!(report.files_rewritten, 1);
+        assert_eq!(report.env_keys_written, 1);
+        assert!(!temp_dir.join(".env").exists(), ".env must not exist after dry run");
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            original_content,
+            "file content must remain unchanged"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
