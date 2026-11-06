@@ -7,6 +7,8 @@ use std::sync::LazyLock;
 use rayon::prelude::*;
 use regex::Regex;
 
+// ── Existing patterns ────────────────────────────────────────────────────────
+
 static AWS_ACCESS_KEY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:AKIA|ASIA)[0-9A-Z]{16}").expect("AWS access key pattern"));
 
@@ -27,6 +29,40 @@ static AZURE_STORAGE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Azure storage pattern")
 });
 
+// ── Step 2: new provider patterns ────────────────────────────────────────────
+
+/// GitHub classic PATs:   ghp_<36 alphanumeric>
+/// GitHub fine-grained:   github_pat_<82 alphanumeric+underscore>
+static GITHUB_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})")
+        .expect("GitHub token pattern")
+});
+
+/// Slack bot / user / app / legacy-bot tokens: xoxb-…, xoxp-…, xoxa-…, xoxr-…, xoxs-…
+/// Real tokens contain multiple dash-separated segments, e.g. xoxb-123-456-abc
+static SLACK_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"xox[baprs]-[0-9A-Za-z-]{10,100}").expect("Slack token pattern")
+});
+
+/// Slack incoming-webhook URLs
+static SLACK_WEBHOOK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"https://hooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]+")
+        .expect("Slack webhook pattern")
+});
+
+/// Stripe live secret keys:      sk_live_<24+ alphanumeric>
+/// Stripe live restricted keys:  rk_live_<24+ alphanumeric>
+static STRIPE_SECRET_KEY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:sk|rk)_live_[0-9A-Za-z]{24,}").expect("Stripe secret key pattern")
+});
+
+/// Google Cloud / Maps / Firebase API keys: AIza<35 base64url chars>
+static GOOGLE_API_KEY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"AIza[0-9A-Za-z\-_]{35}").expect("Google API key pattern")
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+
 const ENTROPY_THRESHOLD: f64 = 4.5;
 const MIN_ENTROPY_LEN: usize = 20;
 
@@ -37,18 +73,30 @@ pub enum SecretKind {
     JwtToken,
     GcpServiceAccount,
     AzureStorage,
+    // Step 2 additions
+    GitHubToken,
+    SlackToken,
+    SlackWebhook,
+    StripeSecretKey,
+    GoogleApiKey,
+    // Always last — catch-all
     HighEntropy,
 }
 
 impl SecretKind {
     pub fn env_base(self) -> &'static str {
         match self {
-            Self::AwsAccessKey => "AWS_ACCESS_KEY_ID",
-            Self::OpenAiToken => "OPENAI_API_KEY",
-            Self::JwtToken => "JWT_TOKEN",
+            Self::AwsAccessKey      => "AWS_ACCESS_KEY_ID",
+            Self::OpenAiToken       => "OPENAI_API_KEY",
+            Self::JwtToken          => "JWT_TOKEN",
             Self::GcpServiceAccount => "GCP_PRIVATE_KEY_ID",
-            Self::AzureStorage => "AZURE_STORAGE_CONNECTION_STRING",
-            Self::HighEntropy => "HIGH_ENTROPY_SECRET",
+            Self::AzureStorage      => "AZURE_STORAGE_CONNECTION_STRING",
+            Self::GitHubToken       => "GITHUB_TOKEN",
+            Self::SlackToken        => "SLACK_TOKEN",
+            Self::SlackWebhook      => "SLACK_WEBHOOK_URL",
+            Self::StripeSecretKey   => "STRIPE_SECRET_KEY",
+            Self::GoogleApiKey      => "GOOGLE_API_KEY",
+            Self::HighEntropy       => "HIGH_ENTROPY_SECRET",
         }
     }
 }
@@ -56,12 +104,17 @@ impl SecretKind {
 impl std::fmt::Display for SecretKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::AwsAccessKey => "AWS access key",
-            Self::OpenAiToken => "OpenAI token",
-            Self::JwtToken => "JWT token",
+            Self::AwsAccessKey      => "AWS access key",
+            Self::OpenAiToken       => "OpenAI token",
+            Self::JwtToken          => "JWT token",
             Self::GcpServiceAccount => "GCP service account key ID",
-            Self::AzureStorage => "Azure storage connection string",
-            Self::HighEntropy => "high-entropy string",
+            Self::AzureStorage      => "Azure storage connection string",
+            Self::GitHubToken       => "GitHub token",
+            Self::SlackToken        => "Slack token",
+            Self::SlackWebhook      => "Slack webhook URL",
+            Self::StripeSecretKey   => "Stripe secret key",
+            Self::GoogleApiKey      => "Google API key",
+            Self::HighEntropy       => "high-entropy string",
         })
     }
 }
@@ -236,9 +289,11 @@ fn detect_line(
     in_block: &mut bool,
 ) -> Vec<Finding> {
     let scan = scan_line(line, style, in_block);
+    let patterns = known_patterns();
     let mut findings = Vec::new();
 
-    for (regex, kind) in known_patterns() {
+    // Apply every named pattern to the full line text.
+    for (regex, kind) in &patterns {
         for matched in regex.find_iter(line) {
             let span = (matched.start(), matched.end());
             let literal_span = if range_in_comment(span.0, &scan.comment_ranges) {
@@ -248,7 +303,7 @@ fn detect_line(
             };
             findings.push(Finding {
                 path: path.to_path_buf(),
-                kind,
+                kind: *kind,
                 value: matched.as_str().to_string(),
                 line_number,
                 literal_span,
@@ -256,15 +311,13 @@ fn detect_line(
         }
     }
 
+    // High-entropy fallback: check each quoted literal that wasn't matched above.
     for literal in &scan.literals {
         if range_in_comment(literal.content_span.0, &scan.comment_ranges) {
             continue;
         }
         let content = &line[literal.content_span.0..literal.content_span.1];
-        if known_patterns()
-            .iter()
-            .any(|(regex, _)| regex.find(content).is_some())
-        {
+        if patterns.iter().any(|(regex, _)| regex.find(content).is_some()) {
             continue;
         }
         if is_high_entropy_token(content) {
@@ -281,13 +334,20 @@ fn detect_line(
     findings
 }
 
-fn known_patterns() -> [(Regex, SecretKind); 5] {
-    [
-        (AWS_ACCESS_KEY.clone(), SecretKind::AwsAccessKey),
-        (OPENAI_TOKEN.clone(), SecretKind::OpenAiToken),
-        (JWT_TOKEN.clone(), SecretKind::JwtToken),
+/// All known named patterns in priority order.
+/// New providers: append here — no other function needs updating.
+fn known_patterns() -> Vec<(Regex, SecretKind)> {
+    vec![
+        (AWS_ACCESS_KEY.clone(),      SecretKind::AwsAccessKey),
+        (OPENAI_TOKEN.clone(),        SecretKind::OpenAiToken),
+        (JWT_TOKEN.clone(),           SecretKind::JwtToken),
         (GCP_SERVICE_ACCOUNT.clone(), SecretKind::GcpServiceAccount),
-        (AZURE_STORAGE.clone(), SecretKind::AzureStorage),
+        (AZURE_STORAGE.clone(),       SecretKind::AzureStorage),
+        (GITHUB_TOKEN.clone(),        SecretKind::GitHubToken),
+        (SLACK_TOKEN.clone(),         SecretKind::SlackToken),
+        (SLACK_WEBHOOK.clone(),       SecretKind::SlackWebhook),
+        (STRIPE_SECRET_KEY.clone(),   SecretKind::StripeSecretKey),
+        (GOOGLE_API_KEY.clone(),      SecretKind::GoogleApiKey),
     ]
 }
 
@@ -457,5 +517,132 @@ random = \"q7W9mZ2kP4nR8xL1vC6bH3jF5sD0aYgT\"
         assert!(findings.iter().any(|finding| {
             finding.kind == SecretKind::HighEntropy && finding.literal_span.is_some()
         }));
+    }
+
+    // ── Step 2: new pattern tests ────────────────────────────────────────────
+
+    #[test]
+    fn detects_github_classic_pat() {
+        // ghp_ + exactly 36 alphanumeric characters = 40 chars total
+        let token = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890abcd";
+        // Trim to exactly 40 chars (ghp_ + 36)
+        let token = &token[..40];
+        let source = format!("const token = \"{token}\";\n");
+        let findings = detect_text(Path::new("config.js"), &source);
+        assert!(
+            findings.iter().any(|f| f.kind == SecretKind::GitHubToken && f.value == token),
+            "should detect GitHub classic PAT"
+        );
+    }
+
+    #[test]
+    fn detects_github_fine_grained_pat() {
+        // github_pat_ + exactly 82 chars (alphanumeric+underscore)
+        let suffix = "aB3dEf7gHi_".repeat(7) + "aB3dEf7gH"; // 11*7+9 = 86 — trim to 82
+        let suffix = &suffix[..82];
+        let token = format!("github_pat_{suffix}");
+        let source = format!("token = \"{token}\"\n");
+        let findings = detect_text(Path::new("secrets.py"), &source);
+        assert!(
+            findings.iter().any(|f| f.kind == SecretKind::GitHubToken),
+            "should detect GitHub fine-grained PAT"
+        );
+    }
+
+    #[test]
+    fn detects_slack_bot_token() {
+        // Build at runtime so GitHub push-protection never sees a literal secret.
+        // Real Slack tokens have the form: xoxb-{workspace}-{bot}-{secret}
+        let token = ["xoxb", "123456789012", "123456789012", "AbCdEfGhIj"].join("-");
+        let source = format!("const slackToken = \"{token}\";\n");
+        let findings = detect_text(Path::new("app.ts"), &source);
+        assert!(
+            findings.iter().any(|f| f.kind == SecretKind::SlackToken),
+            "should detect Slack bot token"
+        );
+    }
+
+    #[test]
+    fn detects_slack_webhook_url() {
+        // Split across a join so the literal URL never appears in source.
+        let webhook = [
+            "https://hooks.slack.com/services",
+            "T00000000",
+            "B00000000",
+            "XXXXXXXXXXXXXXXXXXXXXXXX",
+        ]
+        .join("/");
+        let source = format!("webhook_url = \"{webhook}\"\n");
+        let findings = detect_text(Path::new("config.py"), &source);
+        assert!(
+            findings.iter().any(|f| f.kind == SecretKind::SlackWebhook && f.value == webhook),
+            "should detect Slack webhook URL"
+        );
+    }
+
+    #[test]
+    fn detects_stripe_live_secret_key() {
+        // Constructed at runtime — no literal sk_live_ string in source.
+        let key = ["sk", "live", "abcdefghijklmnopqrstuvwx"].join("_");
+        let source = format!("stripe_key = \"{key}\"\n");
+        let findings = detect_text(Path::new("payments.py"), &source);
+        assert!(
+            findings.iter().any(|f| f.kind == SecretKind::StripeSecretKey && f.value == key),
+            "should detect Stripe live secret key"
+        );
+    }
+
+    #[test]
+    fn detects_stripe_restricted_key() {
+        // Constructed at runtime — no literal rk_live_ string in source.
+        let key = ["rk", "live", "ABCDEFGHIJKLMNOPQRSTUVWXYZ12"].join("_");
+        let source = format!("const stripeKey = \"{key}\";\n");
+        let findings = detect_text(Path::new("billing.js"), &source);
+        assert!(
+            findings.iter().any(|f| f.kind == SecretKind::StripeSecretKey && f.value == key),
+            "should detect Stripe restricted live key"
+        );
+    }
+
+    #[test]
+    fn detects_google_api_key() {
+        // AIza + exactly 35 base64url chars = 39 chars total.
+        // Built at runtime to avoid GitHub push-protection flagging the prefix.
+        let key = "AIza".to_string() + "SyD-aBcDeFgHiJkLmNoPqRsTuVwXyZ12345";
+        assert_eq!(key.len(), 39, "test key must be exactly 39 chars");
+        let source = format!("const apiKey = \"{key}\";\n");
+        let findings = detect_text(Path::new("maps.js"), &source);
+        assert!(
+            findings.iter().any(|f| f.kind == SecretKind::GoogleApiKey && f.value == key),
+            "should detect Google API key"
+        );
+    }
+
+    #[test]
+    fn does_not_flag_stripe_test_keys() {
+        // sk_test_ / rk_test_ must NOT be flagged (only live keys are sensitive).
+        // Built at runtime so the literal is never a scannable secret.
+        let test_key = ["sk", "test", "abcdefghijklmnopqrstuvwx"].join("_");
+        let source = format!("stripe_key = \"{test_key}\"\n");
+        let findings = detect_text(Path::new("test_config.py"), &source);
+        assert!(
+            !findings.iter().any(|f| f.kind == SecretKind::StripeSecretKey),
+            "should NOT flag Stripe test keys (sk_test_ / rk_test_)"
+        );
+    }
+
+    #[test]
+    fn all_new_kinds_have_env_base_and_display() {
+        let kinds = [
+            SecretKind::GitHubToken,
+            SecretKind::SlackToken,
+            SecretKind::SlackWebhook,
+            SecretKind::StripeSecretKey,
+            SecretKind::GoogleApiKey,
+        ];
+        for kind in kinds {
+            assert!(!kind.env_base().is_empty(), "{kind} env_base must not be empty");
+            assert!(!kind.to_string().is_empty(), "{kind} Display must not be empty");
+        }
     }
 }
