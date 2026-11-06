@@ -3,10 +3,14 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
+use crate::color::Colors;
 use crate::detector::{self, SecretKind};
 use crate::remediator;
 use crate::scanner::{self, ScanOptions};
+
+static SANDBOX_LOCK: Mutex<()> = Mutex::new(());
 
 const AWS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
 const OPENAI_TOKEN: &str = "sk-testOpenAIToken1234567890abcd";
@@ -80,12 +84,21 @@ impl Sandbox {
 }
 
 /// Create `./secret_sentry_test_sandbox/`, run every pipeline, and print assertions.
+#[allow(dead_code)]
 pub fn run_self_test() -> Result<(), SelfTestError> {
+    run_self_test_with_colors(Colors::new(false))
+}
+
+/// Run self-test with specific color configuration.
+pub fn run_self_test_with_colors(colors: Colors) -> Result<(), SelfTestError> {
+    let _lock = SANDBOX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let sandbox = Sandbox::create().map_err(|err| SelfTestError {
         report: format!("SecretSentry self-test\n  [FAIL] create sandbox: {err}\n"),
     })?;
     let path = sandbox.path.clone();
-    let outcome = evaluate(&path);
+    let outcome = evaluate(&path, colors);
     let cleanup = sandbox.cleanup();
     match (outcome, cleanup) {
         (Ok(mut checks), Ok(())) => {
@@ -94,7 +107,7 @@ pub fn run_self_test() -> Result<(), SelfTestError> {
                 passed: true,
                 detail: String::new(),
             });
-            finish(checks)
+            finish(checks, colors)
         }
         (Ok(mut checks), Err(err)) => {
             checks.push(Check {
@@ -102,7 +115,7 @@ pub fn run_self_test() -> Result<(), SelfTestError> {
                 passed: false,
                 detail: err.to_string(),
             });
-            finish(checks)
+            finish(checks, colors)
         }
         (Err(err), Ok(())) => Err(err),
         (Err(mut err), Err(cleanup_err)) => {
@@ -114,7 +127,7 @@ pub fn run_self_test() -> Result<(), SelfTestError> {
     }
 }
 
-fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
+fn evaluate(root: &Path, colors: Colors) -> Result<Vec<Check>, SelfTestError> {
     let mut checks = Vec::new();
 
     let files = match scanner::scan_with(
@@ -131,7 +144,7 @@ fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
                 passed: false,
                 detail: err.to_string(),
             });
-            return Err(failure(checks));
+            return Err(failure(checks, colors));
         }
     };
     record(
@@ -149,7 +162,7 @@ fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
                 passed: false,
                 detail: err.to_string(),
             });
-            return Err(failure(checks));
+            return Err(failure(checks, colors));
         }
     };
     let dry_run_report = match remediator::remediate_with_options(root, &findings, true) {
@@ -160,7 +173,7 @@ fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
                 passed: false,
                 detail: err.to_string(),
             });
-            return Err(failure(checks));
+            return Err(failure(checks, colors));
         }
     };
     record(
@@ -209,7 +222,7 @@ fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
                 passed: false,
                 detail: err.to_string(),
             });
-            return Err(failure(checks));
+            return Err(failure(checks, colors));
         }
     };
 
@@ -377,7 +390,7 @@ fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
     );
 
     if checks.iter().any(|check| !check.passed) {
-        return Err(failure(checks));
+        return Err(failure(checks, colors));
     }
     Ok(checks)
 }
@@ -418,14 +431,14 @@ fn record(checks: &mut Vec<Check>, name: &str, passed: bool, detail: &str) {
     });
 }
 
-fn failure(checks: Vec<Check>) -> SelfTestError {
+fn failure(checks: Vec<Check>, colors: Colors) -> SelfTestError {
     SelfTestError {
-        report: render(&checks),
+        report: render(&checks, colors),
     }
 }
 
-fn finish(checks: Vec<Check>) -> Result<(), SelfTestError> {
-    let report = render(&checks);
+fn finish(checks: Vec<Check>, colors: Colors) -> Result<(), SelfTestError> {
+    let report = render(&checks, colors);
     println!("{report}");
     if checks.iter().any(|check| !check.passed) {
         Err(SelfTestError { report })
@@ -434,23 +447,33 @@ fn finish(checks: Vec<Check>) -> Result<(), SelfTestError> {
     }
 }
 
-fn render(checks: &[Check]) -> String {
+fn render(checks: &[Check], colors: Colors) -> String {
     let failed = checks.iter().filter(|check| !check.passed).count();
     let mut report = String::from("SecretSentry self-test\n");
     for check in checks {
-        let status = if check.passed { "PASS" } else { "FAIL" };
+        let status = if check.passed {
+            colors.bold_green("PASS")
+        } else {
+            colors.bold_red("FAIL")
+        };
         report.push_str(&format!("  [{status}] {}\n", check.name));
         if !check.passed && !check.detail.is_empty() {
             for line in check.detail.lines() {
-                report.push_str(&format!("         {line}\n"));
+                report.push_str(&format!("         {}\n", colors.dim(line)));
             }
         }
     }
-    report.push_str(&format!(
-        "{} passed, {} failed\n",
-        checks.len() - failed,
-        failed
-    ));
+    let passed_str = if failed == 0 {
+        colors.bold_green(&format!("{} passed", checks.len() - failed))
+    } else {
+        format!("{} passed", checks.len() - failed)
+    };
+    let failed_str = if failed > 0 {
+        colors.bold_red(&format!("{failed} failed"))
+    } else {
+        format!("{failed} failed")
+    };
+    report.push_str(&format!("{passed_str}, {failed_str}\n"));
     report
 }
 
@@ -560,5 +583,10 @@ mod tests {
     #[test]
     fn harness_detects_isolates_and_rewrites() {
         run_self_test().unwrap();
+    }
+
+    #[test]
+    fn harness_runs_with_colors_disabled() {
+        run_self_test_with_colors(Colors::new(true)).unwrap();
     }
 }

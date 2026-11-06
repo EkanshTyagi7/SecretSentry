@@ -1,3 +1,4 @@
+mod color;
 mod detector;
 mod remediator;
 mod scanner;
@@ -6,16 +7,19 @@ mod tester;
 use std::path::Path;
 use std::process::ExitCode;
 
+use color::Colors;
+
 const USAGE: &str = "\
 SecretSentry
 
 Usage:
-  secretsentry <directory> [--dry-run]
-  secretsentry --self-test
+  secretsentry <directory> [--dry-run] [--no-color]
+  secretsentry --self-test [--no-color]
   secretsentry --help
 
 Options:
   --dry-run    Preview secrets and planned code changes without modifying files or writing .env
+  --no-color   Disable ANSI colored terminal output
   --self-test  Run the integrated self-test suite and validation checks
   -h, --help   Print this help message
 
@@ -27,7 +31,8 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("error: {err}");
+            let colors = Colors::new(false);
+            eprintln!("{} {err}", colors.bold_red("error:"));
             ExitCode::FAILURE
         }
     }
@@ -42,6 +47,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut target_dir: Option<&str> = None;
     let mut dry_run = false;
+    let mut no_color = false;
+    let mut self_test = false;
 
     for arg in &args {
         match arg.as_str() {
@@ -50,14 +57,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             "--self-test" => {
-                if args.len() > 1 {
-                    return Err("unexpected argument with --self-test".into());
-                }
-                tester::run_self_test()?;
-                return Ok(());
+                self_test = true;
             }
             "--dry-run" => {
                 dry_run = true;
+            }
+            "--no-color" => {
+                no_color = true;
             }
             other if other.starts_with('-') => {
                 return Err(format!("unknown option '{other}'").into());
@@ -71,88 +77,143 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let colors = Colors::new(no_color);
+
+    if self_test {
+        if target_dir.is_some() || dry_run {
+            return Err("unexpected arguments with --self-test".into());
+        }
+        tester::run_self_test_with_colors(colors)?;
+        return Ok(());
+    }
+
     let Some(path) = target_dir else {
         eprint!("{USAGE}");
         return Err("missing target directory".into());
     };
 
-    run_pipeline(Path::new(path), dry_run)?;
+    run_pipeline(Path::new(path), dry_run, colors)?;
     Ok(())
 }
 
-fn run_pipeline(root: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn run_pipeline(
+    root: &Path,
+    dry_run: bool,
+    colors: Colors,
+) -> Result<(), Box<dyn std::error::Error>> {
     let files = scanner::scan(root)?;
     let findings = detector::detect(&files)?;
-    println!("scanned {} files", files.len());
-    println!("detected {} secrets", findings.len());
+    println!(
+        "{} {}",
+        colors.cyan("scanned"),
+        format!("{} files", files.len())
+    );
+    if findings.is_empty() {
+        println!("{}", colors.bold_green("detected 0 secrets"));
+    } else {
+        println!(
+            "{}",
+            colors.bold_yellow(&format!("detected {} secrets", findings.len()))
+        );
+    }
     for finding in &findings {
         println!(
             "{}:{}: {} {}",
-            finding.path.display(),
-            finding.line_number,
-            finding.kind,
-            finding.value
+            colors.bold(&finding.path.display().to_string()),
+            colors.cyan(&finding.line_number.to_string()),
+            colors.bold_red(&finding.kind.to_string()),
+            colors.red(&finding.value)
         );
     }
     let report = remediator::remediate_with_options(root, &findings, dry_run)?;
     if report.dry_run {
         println!();
-        println!("[DRY RUN] Planned replacements:");
+        println!(
+            "{} {}",
+            colors.bold_yellow("[DRY RUN]"),
+            colors.bold("Planned replacements:")
+        );
         for action in &report.planned_actions {
             if let Some(replacement) = &action.replacement {
                 println!(
                     "  {}:{}: -> {}",
                     action.path.display(),
                     action.line_number,
-                    replacement
+                    colors.bold_green(replacement)
                 );
             } else {
                 println!(
-                    "  {}:{}: (cannot rewrite automatically, literal span not isolated)",
+                    "  {}:{}: {}",
                     action.path.display(),
-                    action.line_number
+                    action.line_number,
+                    colors.dim("(cannot rewrite automatically, literal span not isolated)")
                 );
             }
         }
         println!();
         println!(
-            "[DRY RUN] Would isolate {} keys into {}",
-            report.env_keys_written,
-            report.env_path.display()
+            "{} Would isolate {} keys into {}",
+            colors.bold_yellow("[DRY RUN]"),
+            colors.bold(&report.env_keys_written.to_string()),
+            colors.cyan(&report.env_path.display().to_string())
         );
         if report.env_example_keys_written > 0 {
             println!(
-                "[DRY RUN] Would create {} with {} placeholder entries",
-                report.env_example_path.display(),
-                report.env_example_keys_written
+                "{} Would create {} with {} placeholder entries",
+                colors.bold_yellow("[DRY RUN]"),
+                colors.cyan(&report.env_example_path.display().to_string()),
+                colors.bold(&report.env_example_keys_written.to_string())
             );
         } else {
-            println!("[DRY RUN] .env.example already up to date");
+            println!(
+                "{} .env.example already up to date",
+                colors.bold_yellow("[DRY RUN]")
+            );
         }
         if report.gitignore_updated {
-            println!("[DRY RUN] Would add .env to .gitignore");
+            println!(
+                "{} Would add .env to .gitignore",
+                colors.bold_yellow("[DRY RUN]")
+            );
         } else {
-            println!("[DRY RUN] .env already covered in .gitignore");
+            println!(
+                "{} .env already covered in .gitignore",
+                colors.bold_yellow("[DRY RUN]")
+            );
         }
-        println!("[DRY RUN] Would rewrite {} source files", report.files_rewritten);
-        println!("[DRY RUN] No files on disk were modified.");
+        println!(
+            "{} Would rewrite {} source files",
+            colors.bold_yellow("[DRY RUN]"),
+            colors.bold(&report.files_rewritten.to_string())
+        );
+        println!(
+            "{} {}",
+            colors.bold_yellow("[DRY RUN]"),
+            colors.dim("No files on disk were modified.")
+        );
     } else {
         println!(
-            "isolated {} keys into {}",
-            report.env_keys_written,
-            report.env_path.display()
+            "{} {} keys into {}",
+            colors.bold_green("isolated"),
+            colors.bold(&report.env_keys_written.to_string()),
+            colors.cyan(&report.env_path.display().to_string())
         );
         if report.env_example_keys_written > 0 {
             println!(
-                "created {} entries in {}",
-                report.env_example_keys_written,
-                report.env_example_path.display()
+                "{} {} entries in {}",
+                colors.bold_green("created"),
+                colors.bold(&report.env_example_keys_written.to_string()),
+                colors.cyan(&report.env_example_path.display().to_string())
             );
         }
         if report.gitignore_updated {
-            println!("added .env to .gitignore");
+            println!("{}", colors.bold_green("added .env to .gitignore"));
         }
-        println!("rewrote {} source files", report.files_rewritten);
+        println!(
+            "{} {} source files",
+            colors.bold_green("rewrote"),
+            colors.bold(&report.files_rewritten.to_string())
+        );
     }
     Ok(())
 }
