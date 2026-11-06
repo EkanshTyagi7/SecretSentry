@@ -120,6 +120,20 @@ fn run_pipeline(root: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Er
             report.env_keys_written,
             report.env_path.display()
         );
+        if report.env_example_keys_written > 0 {
+            println!(
+                "[DRY RUN] Would create {} with {} placeholder entries",
+                report.env_example_path.display(),
+                report.env_example_keys_written
+            );
+        } else {
+            println!("[DRY RUN] .env.example already up to date");
+        }
+        if report.gitignore_updated {
+            println!("[DRY RUN] Would add .env to .gitignore");
+        } else {
+            println!("[DRY RUN] .env already covered in .gitignore");
+        }
         println!("[DRY RUN] Would rewrite {} source files", report.files_rewritten);
         println!("[DRY RUN] No files on disk were modified.");
     } else {
@@ -128,6 +142,16 @@ fn run_pipeline(root: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Er
             report.env_keys_written,
             report.env_path.display()
         );
+        if report.env_example_keys_written > 0 {
+            println!(
+                "created {} entries in {}",
+                report.env_example_keys_written,
+                report.env_example_path.display()
+            );
+        }
+        if report.gitignore_updated {
+            println!("added .env to .gitignore");
+        }
         println!("rewrote {} source files", report.files_rewritten);
     }
     Ok(())

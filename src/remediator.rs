@@ -39,14 +39,14 @@ impl std::fmt::Display for RemediateError {
             Self::BadSpan { path, line } => {
                 write!(f, "invalid replacement span in {}:{}", path.display(), line)
             }
-            Self::Overlap { path, line } => {
-                write!(f, "overlapping replacements in {}:{}", path.display(), line)
-            }
+            Self::Overlap { path, line } => write!(
+                f,
+                "conflicting replacements on line {} in {}",
+                line,
+                path.display()
+            ),
             Self::UnsafeEnvEntry { key } => {
-                write!(
-                    f,
-                    "refusing to write env entry {key} because it contains a newline or '='"
-                )
+                write!(f, "refusing to write malformed .env entry for key '{key}'")
             }
         }
     }
@@ -69,6 +69,9 @@ pub struct RemediationReport {
     pub files_rewritten: usize,
     pub dry_run: bool,
     pub planned_actions: Vec<PlannedAction>,
+    pub env_example_path: PathBuf,
+    pub env_example_keys_written: usize,
+    pub gitignore_updated: bool,
 }
 
 struct Planned {
@@ -121,6 +124,7 @@ pub fn remediate_with_options(
     dry_run: bool,
 ) -> Result<RemediationReport, RemediateError> {
     let env_path = root.join(".env");
+    let env_example_path = root.join(".env.example");
     let planned = plan(findings);
     let planned_actions: Vec<PlannedAction> = planned
         .iter()
@@ -132,6 +136,14 @@ pub fn remediate_with_options(
         })
         .collect();
 
+    let mut seen_keys: HashSet<String> = HashSet::new();
+    let mut unique_env_keys: Vec<String> = Vec::new();
+    for item in &planned {
+        if seen_keys.insert(item.env_key.clone()) {
+            unique_env_keys.push(item.env_key.clone());
+        }
+    }
+
     if findings.is_empty() {
         return Ok(RemediationReport {
             env_path,
@@ -139,6 +151,9 @@ pub fn remediate_with_options(
             files_rewritten: 0,
             dry_run,
             planned_actions,
+            env_example_path,
+            env_example_keys_written: 0,
+            gitignore_updated: false,
         });
     }
 
@@ -201,12 +216,19 @@ pub fn remediate_with_options(
             }
         }
 
+        let env_example_keys_written =
+            write_env_example(&env_example_path, &unique_env_keys, true)?;
+        let gitignore_updated = ensure_gitignore_has_env(root, true)?;
+
         return Ok(RemediationReport {
             env_path,
             env_keys_written: would_write_keys,
             files_rewritten: files_to_rewrite,
             dry_run: true,
             planned_actions,
+            env_example_path,
+            env_example_keys_written,
+            gitignore_updated,
         });
     }
 
@@ -224,12 +246,19 @@ pub fn remediate_with_options(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .written;
 
+    let env_example_keys_written =
+        write_env_example(&env_example_path, &unique_env_keys, false)?;
+    let gitignore_updated = ensure_gitignore_has_env(root, false)?;
+
     Ok(RemediationReport {
         env_path,
         env_keys_written,
         files_rewritten: rewritten,
         dry_run: false,
         planned_actions,
+        env_example_path,
+        env_example_keys_written,
+        gitignore_updated,
     })
 }
 
@@ -342,6 +371,137 @@ fn open_env(path: &Path) -> Result<EnvWriter, RemediateError> {
         seen,
         written: 0,
     })
+}
+
+fn placeholder_for(key: &str) -> String {
+    format!("your_{}_here", key.to_ascii_lowercase())
+}
+
+fn write_env_example(
+    path: &Path,
+    unique_env_keys: &[String],
+    dry_run: bool,
+) -> Result<usize, RemediateError> {
+    let (existing_keys, file_already_existed, needs_leading_newline) = if path.exists() {
+        let content = fs::read_to_string(path)
+            .map_err(|source| RemediateError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let keys: HashSet<String> = content
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.starts_with('#') || line.is_empty() {
+                    return None;
+                }
+                line.split_once('=').map(|(k, _)| k.trim().to_string())
+            })
+            .collect();
+        let needs_nl = !content.is_empty() && !content.ends_with('\n');
+        (keys, true, needs_nl)
+    } else {
+        (HashSet::new(), false, false)
+    };
+
+    let new_keys: Vec<&String> = unique_env_keys
+        .iter()
+        .filter(|key| !existing_keys.contains(*key))
+        .collect();
+
+    if dry_run {
+        return Ok(new_keys.len());
+    }
+    if new_keys.is_empty() {
+        return Ok(0);
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|source| RemediateError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    if !file_already_existed {
+        file.write_all(b"# .env.example - Generated by SecretSentry\n")
+            .and_then(|_| {
+                file.write_all(b"# Copy this file to .env and fill in your actual credentials\n")
+            })
+            .map_err(|source| RemediateError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    } else if needs_leading_newline {
+        file.write_all(b"\n")
+            .map_err(|source| RemediateError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
+
+    for key in &new_keys {
+        let line = format!("{}={}\n", key, placeholder_for(key));
+        file.write_all(line.as_bytes())
+            .map_err(|source| RemediateError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
+    Ok(new_keys.len())
+}
+
+fn ensure_gitignore_has_env(root: &Path, dry_run: bool) -> Result<bool, RemediateError> {
+    let gitignore_path = root.join(".gitignore");
+    let (already_covered, is_empty, needs_leading_newline) = if gitignore_path.exists() {
+        let content = fs::read_to_string(&gitignore_path)
+            .map_err(|source| RemediateError::Io {
+                path: gitignore_path.clone(),
+                source,
+            })?;
+        let covered = content.lines().any(|line| {
+            let t = line.trim();
+            !t.starts_with('#') && matches!(t, ".env" | ".env*" | "*.env" | "**/.env")
+        });
+        let empty = content.trim().is_empty();
+        let needs_nl = !content.is_empty() && !content.ends_with('\n');
+        (covered, empty, needs_nl)
+    } else {
+        (false, true, false)
+    };
+
+    if already_covered {
+        return Ok(false);
+    }
+    if dry_run {
+        return Ok(true);
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&gitignore_path)
+        .map_err(|source| RemediateError::Io {
+            path: gitignore_path.clone(),
+            source,
+        })?;
+
+    let to_write = if is_empty {
+        "# Added by SecretSentry - keep secrets out of version control\n.env\n"
+    } else if needs_leading_newline {
+        "\n\n# Added by SecretSentry - keep secrets out of version control\n.env\n"
+    } else {
+        "\n# Added by SecretSentry - keep secrets out of version control\n.env\n"
+    };
+
+    file.write_all(to_write.as_bytes())
+        .map_err(|source| RemediateError::Io {
+            path: gitignore_path,
+            source,
+        })?;
+    Ok(true)
 }
 
 fn apply_group(
@@ -540,6 +700,54 @@ settings = {
             original_content,
             "file content must remain unchanged"
         );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn dry_run_does_not_create_env_example_or_modify_gitignore() {
+        let temp_dir = std::env::temp_dir().join("secretsentry_envexample_dry_test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join(".gitignore"), "ignored.txt\n").unwrap();
+        let file_path = temp_dir.join("sample.py");
+        let content = "aws_key = \"AKIAIOSFODNN7EXAMPLE\"\n";
+        fs::write(&file_path, content).unwrap();
+
+        let findings = detect_text(&file_path, content);
+        let report = remediate_with_options(&temp_dir, &findings, true).unwrap();
+        assert!(report.dry_run);
+        assert!(!temp_dir.join(".env").exists());
+        assert!(!temp_dir.join(".env.example").exists());
+        assert_eq!(report.env_example_keys_written, 1);
+        assert!(report.gitignore_updated);
+        let gitignore = fs::read_to_string(temp_dir.join(".gitignore")).unwrap();
+        assert!(!gitignore.contains(".env"), ".gitignore must not be modified in dry-run");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn live_run_creates_env_example_and_updates_gitignore() {
+        let temp_dir = std::env::temp_dir().join("secretsentry_live_envexample_test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join(".gitignore"), "ignored.txt\n").unwrap();
+        let file_path = temp_dir.join("sample.py");
+        let content = "aws_key = \"AKIAIOSFODNN7EXAMPLE\"\n";
+        fs::write(&file_path, content).unwrap();
+
+        let findings = detect_text(&file_path, content);
+        let report = remediate_with_options(&temp_dir, &findings, false).unwrap();
+        assert!(!report.dry_run);
+        assert_eq!(report.env_example_keys_written, 1);
+        assert!(report.gitignore_updated);
+
+        let example = fs::read_to_string(temp_dir.join(".env.example")).unwrap();
+        assert!(example.contains("AWS_ACCESS_KEY_ID=your_aws_access_key_id_here"));
+
+        let gitignore = fs::read_to_string(temp_dir.join(".gitignore")).unwrap();
+        assert!(gitignore.lines().any(|l| l.trim() == ".env"));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

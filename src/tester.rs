@@ -104,14 +104,11 @@ pub fn run_self_test() -> Result<(), SelfTestError> {
             });
             finish(checks)
         }
-        (Err(err), cleanup) => {
-            if let Err(cleanup_err) = cleanup {
-                let mut report = err.report;
-                report.push_str(&format!(
-                    "  [FAIL] cleaned up ./{SANDBOX_DIR}: {cleanup_err}\n"
-                ));
-                return Err(SelfTestError { report });
-            }
+        (Err(err), Ok(())) => Err(err),
+        (Err(mut err), Err(cleanup_err)) => {
+            err.report.push_str(&format!(
+                "  [FAIL] cleanup ./{SANDBOX_DIR}: {cleanup_err}\n"
+            ));
             Err(err)
         }
     }
@@ -119,11 +116,14 @@ pub fn run_self_test() -> Result<(), SelfTestError> {
 
 fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
     let mut checks = Vec::new();
-    let options = ScanOptions {
-        respect_parent_ignores: false,
-        respect_global_gitignore: false,
-    };
-    let files = match scanner::scan_with(root, &options) {
+
+    let files = match scanner::scan_with(
+        root,
+        &ScanOptions {
+            respect_parent_ignores: false,
+            respect_global_gitignore: false,
+        },
+    ) {
         Ok(files) => files,
         Err(err) => {
             checks.push(Check {
@@ -134,6 +134,13 @@ fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
             return Err(failure(checks));
         }
     };
+    record(
+        &mut checks,
+        "scanner discovered test files",
+        !files.is_empty(),
+        "no files returned",
+    );
+
     let findings = match detector::detect(&files) {
         Ok(findings) => findings,
         Err(err) => {
@@ -164,9 +171,34 @@ fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
     );
     record(
         &mut checks,
+        "dry run did not create .env.example",
+        !root.join(".env.example").exists(),
+        ".env.example was created during dry run",
+    );
+    let gitignore_after_dry = fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
+    record(
+        &mut checks,
+        "dry run did not modify .gitignore",
+        !gitignore_after_dry.lines().any(|l| l.trim() == ".env"),
+        ".gitignore was modified during dry run",
+    );
+    record(
+        &mut checks,
         "dry run predicted rewritten files accurately",
         dry_run_report.files_rewritten == 4,
         &format!("predicted {}", dry_run_report.files_rewritten),
+    );
+    record(
+        &mut checks,
+        "dry run predicted env example keys accurately",
+        dry_run_report.env_example_keys_written == 6,
+        &format!("predicted {}", dry_run_report.env_example_keys_written),
+    );
+    record(
+        &mut checks,
+        "dry run predicted gitignore would be updated",
+        dry_run_report.gitignore_updated,
+        "gitignore_updated should be true",
     );
 
     let report = match remediator::remediate(root, &findings) {
@@ -283,6 +315,48 @@ fn evaluate(root: &Path) -> Result<Vec<Check>, SelfTestError> {
             );
         }
         Err(err) => record(&mut checks, ".env was created", false, &err.to_string()),
+    }
+
+    match fs::read_to_string(&report.env_example_path) {
+        Ok(content) => {
+            let example_entries: BTreeSet<_> = content
+                .lines()
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect();
+            record(
+                &mut checks,
+                ".env.example has correct number of entries",
+                example_entries.len() == 6,
+                &format!("found {} entries", example_entries.len()),
+            );
+            for key in [
+                "AWS_ACCESS_KEY_ID",
+                "OPENAI_API_KEY",
+                "JWT_TOKEN",
+                "GCP_PRIVATE_KEY_ID",
+                "AZURE_STORAGE_CONNECTION_STRING",
+                "HIGH_ENTROPY_SECRET",
+            ] {
+                let expected = format!("{key}=your_{}_here", key.to_ascii_lowercase());
+                record(
+                    &mut checks,
+                    &format!(".env.example contains {key}"),
+                    example_entries.contains(expected.as_str()),
+                    &format!("missing: {expected}"),
+                );
+            }
+        }
+        Err(err) => record(&mut checks, ".env.example was created", false, &err.to_string()),
+    }
+
+    match fs::read_to_string(root.join(".gitignore")) {
+        Ok(content) => record(
+            &mut checks,
+            ".gitignore contains .env",
+            content.lines().any(|l| l.trim() == ".env"),
+            ".env not found in .gitignore",
+        ),
+        Err(err) => record(&mut checks, ".gitignore is readable", false, &err.to_string()),
     }
 
     compare_file(&mut checks, root, "sample.py", &python_expected());
