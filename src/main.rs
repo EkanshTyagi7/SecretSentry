@@ -1,6 +1,7 @@
 mod color;
 mod config;
 mod detector;
+mod hook;
 mod remediator;
 mod scanner;
 mod tester;
@@ -16,6 +17,7 @@ SecretSentry
 
 Usage:
   secretsentry <directory> [--dry-run] [--no-color] [--config <path>]
+  secretsentry --install-hook [directory] [--no-color]
   secretsentry --self-test [--no-color]
   secretsentry --help
 
@@ -23,11 +25,12 @@ Options:
   --dry-run        Preview secrets and planned code changes without modifying files or writing .env
   --no-color       Disable ANSI colored terminal output
   --config <path>  Path to configuration file (default: <directory>/.secretsentry.toml)
+  --install-hook   Install Git pre-commit hook to block commits containing secrets
   --self-test      Run the integrated self-test suite and validation checks
   -h, --help       Print this help message
 
 Scans a directory for secrets, writes them to .env, and rewrites Rust,
-Python, and JavaScript/TypeScript string literals into environment calls.
+Python, JavaScript/TypeScript, Go, Java, C#, PHP, and Ruby literals into environment calls.
 ";
 
 fn main() -> ExitCode {
@@ -52,6 +55,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut dry_run = false;
     let mut no_color = false;
     let mut self_test = false;
+    let mut install_hook = false;
     let mut config_path: Option<String> = None;
 
     let mut i = 0;
@@ -63,6 +67,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--self-test" => {
                 self_test = true;
+            }
+            "--install-hook" => {
+                install_hook = true;
             }
             "--dry-run" => {
                 dry_run = true;
@@ -93,10 +100,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let colors = Colors::new(no_color);
 
     if self_test {
-        if target_dir.is_some() || dry_run || config_path.is_some() {
+        if target_dir.is_some() || dry_run || config_path.is_some() || install_hook {
             return Err("unexpected arguments with --self-test".into());
         }
         tester::run_self_test_with_colors(colors)?;
+        return Ok(());
+    }
+
+    if install_hook {
+        if dry_run || config_path.is_some() {
+            return Err("unexpected arguments with --install-hook".into());
+        }
+        let target_path = Path::new(target_dir.unwrap_or("."));
+        let status = hook::install_hook(target_path)?;
+        hook::print_install_result(target_path, status, &colors);
         return Ok(());
     }
 

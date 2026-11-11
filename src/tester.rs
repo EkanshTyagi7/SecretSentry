@@ -55,6 +55,7 @@ impl Sandbox {
         }
         fs::create_dir_all(path.join("target"))?;
         fs::create_dir_all(path.join("node_modules"))?;
+        fs::create_dir_all(path.join(".git"))?;
         fs::write(path.join(".gitignore"), "ignored_secret.py\n")?;
         fs::write(
             path.join("ignored_secret.py"),
@@ -428,6 +429,44 @@ fn evaluate(root: &Path, colors: Colors) -> Result<Vec<Check>, SelfTestError> {
         ),
         Err(err) => record(&mut checks, ".gitignore is readable", false, &err.to_string()),
     }
+
+    match crate::hook::install_hook(root) {
+        Ok(status) => {
+            record(
+                &mut checks,
+                "pre-commit hook installed successfully",
+                status == crate::hook::InstallStatus::Created,
+                &format!("expected Created, got {status:?}"),
+            );
+            let hook_file = root.join(".git").join("hooks").join("pre-commit");
+            let hook_content = fs::read_to_string(&hook_file).unwrap_or_default();
+            record(
+                &mut checks,
+                "pre-commit hook contains SecretSentry check",
+                hook_content.contains(crate::hook::HOOK_MARKER)
+                    && hook_content.contains("detected [1-9][0-9]* secrets"),
+                "hook file did not contain expected content",
+            );
+            let second_status = crate::hook::install_hook(root);
+            record(
+                &mut checks,
+                "pre-commit hook installation is idempotent",
+                second_status.as_ref().map(|s| *s == crate::hook::InstallStatus::AlreadyPresent).unwrap_or(false),
+                &format!("expected AlreadyPresent, got {second_status:?}"),
+            );
+        }
+        Err(err) => {
+            record(&mut checks, "pre-commit hook installed successfully", false, &err.to_string());
+        }
+    }
+
+    let non_git_check = crate::hook::install_hook(&root.join("target"));
+    record(
+        &mut checks,
+        "pre-commit hook rejects non-git directory",
+        matches!(non_git_check, Err(crate::hook::HookError::NotGitRepo { .. })),
+        &format!("expected NotGitRepo error, got {non_git_check:?}"),
+    );
 
     compare_file(&mut checks, root, "sample.py", &python_expected());
     compare_file(&mut checks, root, "sample.js", &javascript_expected());
