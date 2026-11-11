@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 
+use crate::config::Config;
+
 /// Controls ignore rules inherited from outside the scan root.
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
@@ -59,14 +61,29 @@ const LOCKFILES: &[&str] = &[
 ];
 
 /// Walk `root`, skipping gitignored paths, `.git`, `target/`, and `node_modules/`.
+#[allow(dead_code)]
 pub fn scan(root: &Path) -> Result<Vec<PathBuf>, ScanError> {
-    scan_with(root, &ScanOptions::default())
+    scan_with_config(root, &ScanOptions::default(), &Config::default())
 }
 
 pub fn scan_with(root: &Path, options: &ScanOptions) -> Result<Vec<PathBuf>, ScanError> {
+    scan_with_config(root, options, &Config::default())
+}
+
+pub fn scan_with_config(
+    root: &Path,
+    options: &ScanOptions,
+    config: &Config,
+) -> Result<Vec<PathBuf>, ScanError> {
     if !root.is_dir() {
         return Err(ScanError::NotADirectory(root.to_path_buf()));
     }
+
+    let max_bytes = if config.scan.max_file_bytes > 0 {
+        config.scan.max_file_bytes
+    } else {
+        MAX_FILE_BYTES
+    };
 
     let walker = WalkBuilder::new(root)
         .standard_filters(true)
@@ -74,7 +91,7 @@ pub fn scan_with(root: &Path, options: &ScanOptions) -> Result<Vec<PathBuf>, Sca
         .parents(options.respect_parent_ignores)
         .git_global(options.respect_global_gitignore)
         .git_exclude(options.respect_global_gitignore)
-        .max_filesize(Some(MAX_FILE_BYTES))
+        .max_filesize(Some(max_bytes))
         .filter_entry(|entry| !is_skipped_directory(entry))
         .build();
 
@@ -88,7 +105,7 @@ pub fn scan_with(root: &Path, options: &ScanOptions) -> Result<Vec<PathBuf>, Sca
 
     let mut files: Vec<PathBuf> = paths
         .into_par_iter()
-        .filter(|path| !is_skipped_file(path))
+        .filter(|path| !is_skipped_file(path) && !config.is_file_ignored(path))
         .collect();
     files.sort();
     files.dedup();

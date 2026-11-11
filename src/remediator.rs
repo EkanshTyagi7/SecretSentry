@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 
+use crate::config::Config;
 use crate::detector::{self, Finding, SecretKind};
 
 #[derive(Debug)]
@@ -114,7 +115,7 @@ impl EnvWriter {
 
 /// Rewrite supported literals and append each distinct secret to `root/.env`.
 pub fn remediate(root: &Path, findings: &[Finding]) -> Result<RemediationReport, RemediateError> {
-    remediate_with_options(root, findings, false)
+    remediate_with_config(root, findings, false, &Config::default())
 }
 
 /// Remediate findings with custom options (such as dry-run).
@@ -122,6 +123,16 @@ pub fn remediate_with_options(
     root: &Path,
     findings: &[Finding],
     dry_run: bool,
+) -> Result<RemediationReport, RemediateError> {
+    remediate_with_config(root, findings, dry_run, &Config::default())
+}
+
+/// Remediate findings with full configuration support.
+pub fn remediate_with_config(
+    root: &Path,
+    findings: &[Finding],
+    dry_run: bool,
+    config: &Config,
 ) -> Result<RemediationReport, RemediateError> {
     let env_path = root.join(".env");
     let env_example_path = root.join(".env.example");
@@ -216,9 +227,16 @@ pub fn remediate_with_options(
             }
         }
 
-        let env_example_keys_written =
-            write_env_example(&env_example_path, &unique_env_keys, true)?;
-        let gitignore_updated = ensure_gitignore_has_env(root, true)?;
+        let env_example_keys_written = if config.remediator.create_env_example {
+            write_env_example(&env_example_path, &unique_env_keys, true)?
+        } else {
+            0
+        };
+        let gitignore_updated = if config.remediator.update_gitignore {
+            ensure_gitignore_has_env(root, true)?
+        } else {
+            false
+        };
 
         return Ok(RemediationReport {
             env_path,
@@ -246,9 +264,16 @@ pub fn remediate_with_options(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .written;
 
-    let env_example_keys_written =
-        write_env_example(&env_example_path, &unique_env_keys, false)?;
-    let gitignore_updated = ensure_gitignore_has_env(root, false)?;
+    let env_example_keys_written = if config.remediator.create_env_example {
+        write_env_example(&env_example_path, &unique_env_keys, false)?
+    } else {
+        0
+    };
+    let gitignore_updated = if config.remediator.update_gitignore {
+        ensure_gitignore_has_env(root, false)?
+    } else {
+        false
+    };
 
     Ok(RemediationReport {
         env_path,
@@ -748,6 +773,30 @@ settings = {
 
         let gitignore = fs::read_to_string(temp_dir.join(".gitignore")).unwrap();
         assert!(gitignore.lines().any(|l| l.trim() == ".env"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn config_disables_env_example_and_gitignore() {
+        let mut config = Config::default();
+        config.remediator.create_env_example = false;
+        config.remediator.update_gitignore = false;
+
+        let temp_dir = std::env::temp_dir().join("secretsentry_cfg_remediator_test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = temp_dir.join("sample.py");
+        let content = "aws_key = \"AKIAIOSFODNN7EXAMPLE\"\n";
+        fs::write(&file_path, content).unwrap();
+
+        let findings = detect_text(&file_path, content);
+        let report = remediate_with_config(&temp_dir, &findings, false, &config).unwrap();
+
+        assert_eq!(report.env_example_keys_written, 0);
+        assert!(!report.gitignore_updated);
+        assert!(!temp_dir.join(".env.example").exists());
+        assert!(!temp_dir.join(".gitignore").exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

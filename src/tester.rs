@@ -154,6 +154,38 @@ fn evaluate(root: &Path, colors: Colors) -> Result<Vec<Check>, SelfTestError> {
         "no files returned",
     );
 
+    let (discovered_config, loaded_cfg_path) = match crate::config::Config::find_and_load(root) {
+        Ok(res) => res,
+        Err(err) => {
+            checks.push(Check {
+                name: "config loader completed".to_string(),
+                passed: false,
+                detail: err.to_string(),
+            });
+            return Err(failure(checks, colors));
+        }
+    };
+    record(
+        &mut checks,
+        "config loader uses defaults when no file present",
+        discovered_config == crate::config::Config::default() && loaded_cfg_path.is_none(),
+        "expected default config with no config path",
+    );
+
+    let custom_cfg_str = "[ignore]\npatterns = [\"CUSTOM_ALLOWLISTED\"]\nfiles = [\"custom_skip.py\"]\n";
+    match crate::config::Config::parse_str(custom_cfg_str, Path::new("dummy.toml")) {
+        Ok(parsed) => {
+            record(
+                &mut checks,
+                "config parser reads ignore rules",
+                parsed.ignore.patterns == vec!["CUSTOM_ALLOWLISTED"]
+                    && parsed.ignore.files == vec!["custom_skip.py"],
+                "parsed config did not match expected rules",
+            );
+        }
+        Err(err) => record(&mut checks, "config parser reads ignore rules", false, &err.to_string()),
+    }
+
     let findings = match detector::detect(&files) {
         Ok(findings) => findings,
         Err(err) => {

@@ -1,4 +1,5 @@
 mod color;
+mod config;
 mod detector;
 mod remediator;
 mod scanner;
@@ -8,20 +9,22 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use color::Colors;
+use config::Config;
 
 const USAGE: &str = "\
 SecretSentry
 
 Usage:
-  secretsentry <directory> [--dry-run] [--no-color]
+  secretsentry <directory> [--dry-run] [--no-color] [--config <path>]
   secretsentry --self-test [--no-color]
   secretsentry --help
 
 Options:
-  --dry-run    Preview secrets and planned code changes without modifying files or writing .env
-  --no-color   Disable ANSI colored terminal output
-  --self-test  Run the integrated self-test suite and validation checks
-  -h, --help   Print this help message
+  --dry-run        Preview secrets and planned code changes without modifying files or writing .env
+  --no-color       Disable ANSI colored terminal output
+  --config <path>  Path to configuration file (default: <directory>/.secretsentry.toml)
+  --self-test      Run the integrated self-test suite and validation checks
+  -h, --help       Print this help message
 
 Scans a directory for secrets, writes them to .env, and rewrites Rust,
 Python, and JavaScript/TypeScript string literals into environment calls.
@@ -49,9 +52,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut dry_run = false;
     let mut no_color = false;
     let mut self_test = false;
+    let mut config_path: Option<String> = None;
 
-    for arg in &args {
-        match arg.as_str() {
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
             "--help" | "-h" => {
                 print!("{USAGE}");
                 return Ok(());
@@ -65,6 +70,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--no-color" => {
                 no_color = true;
             }
+            "--config" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("missing path argument after --config".into());
+                }
+                config_path = Some(args[i].clone());
+            }
             other if other.starts_with('-') => {
                 return Err(format!("unknown option '{other}'").into());
             }
@@ -75,24 +87,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 target_dir = Some(path);
             }
         }
+        i += 1;
     }
 
     let colors = Colors::new(no_color);
 
     if self_test {
-        if target_dir.is_some() || dry_run {
+        if target_dir.is_some() || dry_run || config_path.is_some() {
             return Err("unexpected arguments with --self-test".into());
         }
         tester::run_self_test_with_colors(colors)?;
         return Ok(());
     }
 
-    let Some(path) = target_dir else {
+    let Some(path_str) = target_dir else {
         eprint!("{USAGE}");
         return Err("missing target directory".into());
     };
+    let path = Path::new(path_str);
 
-    run_pipeline(Path::new(path), dry_run, colors)?;
+    let (config, loaded_from) = if let Some(ref custom_cfg) = config_path {
+        let p = Path::new(custom_cfg);
+        (Config::load_from_file(p)?, Some(p.to_path_buf()))
+    } else {
+        Config::find_and_load(path)?
+    };
+
+    run_pipeline(path, dry_run, colors, &config, loaded_from.as_deref())?;
     Ok(())
 }
 
@@ -100,9 +121,18 @@ fn run_pipeline(
     root: &Path,
     dry_run: bool,
     colors: Colors,
+    config: &Config,
+    loaded_from: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let files = scanner::scan(root)?;
-    let findings = detector::detect(&files)?;
+    if let Some(cfg_path) = loaded_from {
+        println!(
+            "{} {}",
+            colors.dim("loaded configuration from"),
+            colors.cyan(&cfg_path.display().to_string())
+        );
+    }
+    let files = scanner::scan_with_config(root, &scanner::ScanOptions::default(), config)?;
+    let findings = detector::detect_with_config(&files, config)?;
     println!(
         "{} {}",
         colors.cyan("scanned"),
@@ -125,7 +155,7 @@ fn run_pipeline(
             colors.red(&finding.value)
         );
     }
-    let report = remediator::remediate_with_options(root, &findings, dry_run)?;
+    let report = remediator::remediate_with_config(root, &findings, dry_run, config)?;
     if report.dry_run {
         println!();
         println!(

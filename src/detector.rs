@@ -7,6 +7,8 @@ use std::sync::LazyLock;
 use rayon::prelude::*;
 use regex::Regex;
 
+use crate::config::Config;
+
 // ── Existing patterns ────────────────────────────────────────────────────────
 
 static AWS_ACCESS_KEY: LazyLock<Regex> =
@@ -63,7 +65,9 @@ static GOOGLE_API_KEY: LazyLock<Regex> = LazyLock::new(|| {
 
 // ────────────────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 const ENTROPY_THRESHOLD: f64 = 4.5;
+#[allow(dead_code)]
 const MIN_ENTROPY_LEN: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -199,14 +203,20 @@ pub fn shannon_entropy(value: &str) -> f64 {
         .sum()
 }
 
-/// Detect secrets in `paths`, one file per worker.
+/// Detect secrets in `paths`, one file per worker, using default config.
 pub fn detect(paths: &[PathBuf]) -> Result<Vec<Finding>, DetectError> {
+    detect_with_config(paths, &Config::default())
+}
+
+/// Detect secrets in `paths`, one file per worker, honoring `config`.
+pub fn detect_with_config(paths: &[PathBuf], config: &Config) -> Result<Vec<Finding>, DetectError> {
     let mut findings = paths
         .par_iter()
-        .map(|path| detect_file(path))
+        .map(|path| detect_file_with_config(path, config))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
+        .filter(|finding| !config.is_secret_ignored(&finding.value))
         .collect::<Vec<_>>();
     findings.sort_by(|left, right| {
         (&left.path, left.line_number, &left.value, left.kind).cmp(&(
@@ -219,7 +229,12 @@ pub fn detect(paths: &[PathBuf]) -> Result<Vec<Finding>, DetectError> {
     Ok(findings)
 }
 
+#[allow(dead_code)]
 pub fn detect_file(path: &Path) -> Result<Vec<Finding>, DetectError> {
+    detect_file_with_config(path, &Config::default())
+}
+
+pub fn detect_file_with_config(path: &Path, config: &Config) -> Result<Vec<Finding>, DetectError> {
     let bytes = fs::read(path).map_err(|source| DetectError::Io {
         path: path.to_path_buf(),
         source,
@@ -230,10 +245,15 @@ pub fn detect_file(path: &Path) -> Result<Vec<Finding>, DetectError> {
     let Ok(text) = String::from_utf8(bytes) else {
         return Ok(Vec::new());
     };
-    Ok(detect_text(path, &text))
+    Ok(detect_text_with_config(path, &text, config))
 }
 
+#[allow(dead_code)]
 pub fn detect_text(path: &Path, source: &str) -> Vec<Finding> {
+    detect_text_with_config(path, source, &Config::default())
+}
+
+pub fn detect_text_with_config(path: &Path, source: &str, config: &Config) -> Vec<Finding> {
     let style = comment_style(path);
     let mut in_block = false;
     let mut findings = Vec::new();
@@ -244,6 +264,8 @@ pub fn detect_text(path: &Path, source: &str) -> Vec<Finding> {
             line.text,
             style,
             &mut in_block,
+            config.detector.entropy_threshold,
+            config.detector.min_entropy_len,
         ));
     }
     findings
@@ -287,6 +309,8 @@ fn detect_line(
     line: &str,
     style: CommentStyle,
     in_block: &mut bool,
+    entropy_threshold: f64,
+    min_entropy_len: usize,
 ) -> Vec<Finding> {
     let scan = scan_line(line, style, in_block);
     let patterns = known_patterns();
@@ -320,7 +344,7 @@ fn detect_line(
         if patterns.iter().any(|(regex, _)| regex.find(content).is_some()) {
             continue;
         }
-        if is_high_entropy_token(content) {
+        if is_high_entropy_token(content, entropy_threshold, min_entropy_len) {
             findings.push(Finding {
                 path: path.to_path_buf(),
                 kind: SecretKind::HighEntropy,
@@ -363,8 +387,8 @@ fn range_in_comment(index: usize, comments: &[(usize, usize)]) -> bool {
         .any(|(start, end)| index >= *start && index < *end)
 }
 
-fn is_high_entropy_token(value: &str) -> bool {
-    if value.len() < MIN_ENTROPY_LEN {
+fn is_high_entropy_token(value: &str, entropy_threshold: f64, min_entropy_len: usize) -> bool {
+    if value.len() < min_entropy_len {
         return false;
     }
     let token_bytes = value.bytes().all(|byte| {
@@ -379,7 +403,7 @@ fn is_high_entropy_token(value: &str) -> bool {
     let has_upper = value.bytes().any(|byte| byte.is_ascii_uppercase());
     let has_lower = value.bytes().any(|byte| byte.is_ascii_lowercase());
     let has_digit = value.bytes().any(|byte| byte.is_ascii_digit());
-    has_upper && has_lower && has_digit && shannon_entropy(value) >= ENTROPY_THRESHOLD
+    has_upper && has_lower && has_digit && shannon_entropy(value) >= entropy_threshold
 }
 
 fn scan_line(line: &str, style: CommentStyle, in_block: &mut bool) -> LineScan {
@@ -486,8 +510,8 @@ mod tests {
         let unique = "q7W9mZ2kP4nR8xL1vC6bH3jF5sD0aYgT";
         assert!((shannon_entropy(unique) - 5.0).abs() < 1e-9);
         assert!(shannon_entropy("AKIAIOSFODNN7EXAMPLE") < ENTROPY_THRESHOLD);
-        assert!(!is_high_entropy_token("aaaaaaaaaaaaaaaaaaaaaaaa"));
-        assert!(is_high_entropy_token(unique));
+        assert!(!is_high_entropy_token("aaaaaaaaaaaaaaaaaaaaaaaa", ENTROPY_THRESHOLD, MIN_ENTROPY_LEN));
+        assert!(is_high_entropy_token(unique, ENTROPY_THRESHOLD, MIN_ENTROPY_LEN));
     }
 
     #[test]
@@ -644,5 +668,22 @@ random = \"q7W9mZ2kP4nR8xL1vC6bH3jF5sD0aYgT\"
             assert!(!kind.env_base().is_empty(), "{kind} env_base must not be empty");
             assert!(!kind.to_string().is_empty(), "{kind} Display must not be empty");
         }
+    }
+
+    #[test]
+    fn config_ignores_allowlisted_secret_patterns() {
+        let mut config = Config::default();
+        config.ignore.patterns.push("AKIAIOSFODNN7EXAMPLE".to_string());
+
+        let temp_dir = std::env::temp_dir().join("secretsentry_cfg_ignore_test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = temp_dir.join("sample.py");
+        fs::write(&file_path, "aws_key = \"AKIAIOSFODNN7EXAMPLE\"\n").unwrap();
+
+        let findings = detect_with_config(&[file_path], &config).unwrap();
+        assert!(findings.is_empty(), "allowlisted secret must be ignored");
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
