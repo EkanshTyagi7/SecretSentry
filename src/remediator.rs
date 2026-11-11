@@ -585,7 +585,95 @@ fn apply_edits(path: &Path, source: &str, edits: &[Planned]) -> Result<String, R
         }
         output.push_str(line.ending);
     }
-    Ok(output)
+    let with_imports = inject_imports(path, &output, edits);
+    Ok(with_imports)
+}
+
+fn already_imports_os(source: &str) -> bool {
+    for line in source.lines() {
+        let t = line.trim();
+        if t.starts_with('#') {
+            continue;
+        }
+        if t == "import os" || t.starts_with("import os ") {
+            return true;
+        }
+        if let Some(rest) = t.strip_prefix("import ") {
+            if rest.split(',').any(|pkg| {
+                let pkg_name = pkg.trim().split_whitespace().next().unwrap_or("");
+                pkg_name == "os"
+            }) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn inject_imports(path: &Path, source: &str, edits: &[Planned]) -> String {
+    let ext = extension_of(path).unwrap_or_default();
+    if ext != "py" && ext != "pyw" {
+        return source.to_string();
+    }
+
+    let uses_os_getenv = edits.iter().any(|edit| {
+        edit.replacement
+            .as_deref()
+            .map(|r| r.contains("os.getenv("))
+            .unwrap_or(false)
+    });
+    if !uses_os_getenv {
+        return source.to_string();
+    }
+
+    if already_imports_os(source) {
+        return source.to_string();
+    }
+
+    let nl = if source.contains("\r\n") { "\r\n" } else { "\n" };
+
+    let mut insert_line_idx = 0;
+    for (idx, line) in source.lines().enumerate() {
+        let t = line.trim();
+        if idx == 0 && t.starts_with("#!") {
+            insert_line_idx = idx + 1;
+            continue;
+        }
+        if (idx == 0 || idx == 1) && (t.contains("coding:") || t.contains("coding=")) {
+            insert_line_idx = idx + 1;
+            continue;
+        }
+        break;
+    }
+
+    if insert_line_idx == 0 {
+        if source.is_empty() {
+            format!("import os{nl}")
+        } else {
+            format!("import os{nl}{nl}{source}")
+        }
+    } else {
+        let mut header = String::new();
+        let mut rest = String::new();
+        let mut line_count = 0;
+
+        for line in detector::source_lines(source) {
+            if line_count < insert_line_idx {
+                header.push_str(line.text);
+                header.push_str(line.ending);
+            } else {
+                rest.push_str(line.text);
+                rest.push_str(line.ending);
+            }
+            line_count += 1;
+        }
+
+        if rest.starts_with('\r') || rest.starts_with('\n') {
+            format!("{header}import os{nl}{rest}")
+        } else {
+            format!("{header}{nl}import os{nl}{nl}{rest}")
+        }
+    }
 }
 
 fn replace_spans(
@@ -693,6 +781,8 @@ settings = {
         assert_eq!(
             rewritten,
             "\
+import os
+
 # comment = \"AKIAIOSFODNN7EXAMPLE\"
 real = os.getenv(\"AWS_ACCESS_KEY_ID\")
 partial = \"prefix-AKIAIOSFODNN7EXAMPLE\"
@@ -799,5 +889,41 @@ settings = {
         assert!(!temp_dir.join(".gitignore").exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn injects_import_os_when_missing() {
+        let path = Path::new("test_import.py");
+        let source = "api_key = \"AKIAIOSFODNN7EXAMPLE\"\n";
+        let findings = detect_text(path, source);
+        let rewritten = rewrite_text(path, source, &findings).unwrap();
+        assert_eq!(
+            rewritten,
+            "import os\n\napi_key = os.getenv(\"AWS_ACCESS_KEY_ID\")\n"
+        );
+    }
+
+    #[test]
+    fn does_not_duplicate_existing_import_os() {
+        let path = Path::new("test_existing_import.py");
+        let source = "import os\n\napi_key = \"AKIAIOSFODNN7EXAMPLE\"\n";
+        let findings = detect_text(path, source);
+        let rewritten = rewrite_text(path, source, &findings).unwrap();
+        assert_eq!(
+            rewritten,
+            "import os\n\napi_key = os.getenv(\"AWS_ACCESS_KEY_ID\")\n"
+        );
+    }
+
+    #[test]
+    fn injects_import_os_after_shebang_and_encoding() {
+        let path = Path::new("script.py");
+        let source = "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\nkey = \"AKIAIOSFODNN7EXAMPLE\"\n";
+        let findings = detect_text(path, source);
+        let rewritten = rewrite_text(path, source, &findings).unwrap();
+        assert_eq!(
+            rewritten,
+            "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n\nimport os\n\nkey = os.getenv(\"AWS_ACCESS_KEY_ID\")\n"
+        );
     }
 }

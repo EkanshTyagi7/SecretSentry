@@ -528,6 +528,8 @@ settings = {{
 fn python_expected() -> String {
     format!(
         "\
+import os
+
 aws_access_key = os.getenv(\"AWS_ACCESS_KEY_ID\")
 openai_token = os.getenv(\"OPENAI_API_KEY\")
 high_entropy = os.getenv(\"HIGH_ENTROPY_SECRET\")
