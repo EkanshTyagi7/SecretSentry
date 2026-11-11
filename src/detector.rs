@@ -287,7 +287,8 @@ fn comment_style(path: &Path) -> CommentStyle {
     {
         Some("py" | "sh" | "bash" | "zsh" | "rb" | "yaml" | "yml" | "toml") => CommentStyle::Hash,
         Some(
-            "rs" | "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "java" | "go" | "c" | "h" | "cpp",
+            "rs" | "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "java" | "go" | "c" | "h"
+            | "cpp" | "cs" | "php",
         ) => CommentStyle::Slash,
         _ => CommentStyle::None,
     }

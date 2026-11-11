@@ -356,8 +356,13 @@ fn extension_of(path: &Path) -> Option<String> {
 fn env_expression(extension: &str, key: &str) -> Option<String> {
     match extension {
         "rs" => Some(format!("std::env::var(\"{key}\").unwrap()")),
-        "py" => Some(format!("os.getenv(\"{key}\")")),
+        "py" | "pyw" => Some(format!("os.getenv(\"{key}\")")),
         "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => Some(format!("process.env.{key}")),
+        "go" => Some(format!("os.Getenv(\"{key}\")")),
+        "java" => Some(format!("System.getenv(\"{key}\")")),
+        "cs" => Some(format!("Environment.GetEnvironmentVariable(\"{key}\")")),
+        "php" => Some(format!("getenv(\"{key}\")")),
+        "rb" => Some(format!("ENV[\"{key}\"]")),
         _ => None,
     }
 }
@@ -761,7 +766,35 @@ mod tests {
             env_expression("ts", "HIGH_ENTROPY_SECRET").as_deref(),
             Some("process.env.HIGH_ENTROPY_SECRET")
         );
-        assert_eq!(env_expression("go", "AWS_ACCESS_KEY_ID"), None);
+        assert_eq!(
+            env_expression("go", "AWS_ACCESS_KEY_ID").as_deref(),
+            Some("os.Getenv(\"AWS_ACCESS_KEY_ID\")")
+        );
+    }
+
+    #[test]
+    fn new_language_expressions_match_extensions() {
+        assert_eq!(
+            env_expression("go", "DB_PASSWORD").as_deref(),
+            Some("os.Getenv(\"DB_PASSWORD\")")
+        );
+        assert_eq!(
+            env_expression("java", "DB_PASSWORD").as_deref(),
+            Some("System.getenv(\"DB_PASSWORD\")")
+        );
+        assert_eq!(
+            env_expression("cs", "DB_PASSWORD").as_deref(),
+            Some("Environment.GetEnvironmentVariable(\"DB_PASSWORD\")")
+        );
+        assert_eq!(
+            env_expression("php", "DB_PASSWORD").as_deref(),
+            Some("getenv(\"DB_PASSWORD\")")
+        );
+        assert_eq!(
+            env_expression("rb", "DB_PASSWORD").as_deref(),
+            Some("ENV[\"DB_PASSWORD\"]")
+        );
+        assert_eq!(env_expression("lua", "KEY"), None);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
-[![Tests](https://img.shields.io/badge/self--test-53%20checks%20passed-brightgreen.svg)](#built-in-self-test)
+[![Tests](https://img.shields.io/badge/self--test-78%20checks%20passed-brightgreen.svg)](#built-in-self-test)
 [![Status](https://img.shields.io/badge/status-active-success.svg)](#)
 
 **SecretSentry** is a fast, concurrent CLI security tool written in Rust. It scans codebases for hardcoded credentials, extracts them into `.env`, auto-generates sanitized `.env.example` templates, secures `.gitignore`, and automatically rewrites source code literals into environment variable lookups.
@@ -17,12 +17,17 @@
   - **Python**: `os.getenv("KEY")`
   - **JavaScript / TypeScript**: `process.env.KEY`
   - **Rust**: `std::env::var("KEY").unwrap()`
+  - **Go**: `os.Getenv("KEY")`
+  - **Java**: `System.getenv("KEY")`
+  - **C# / .NET**: `Environment.GetEnvironmentVariable("KEY")`
+  - **PHP**: `getenv("KEY")`
+  - **Ruby**: `ENV["KEY"]`
 - 📋 **`.env.example` Generation**: Automatically writes or merges placeholder values (e.g., `AWS_ACCESS_KEY_ID=your_aws_access_key_id_here`) for team onboarding.
 - 🔒 **`.gitignore` Protection**: Verifies whether `.env` is covered in `.gitignore` and appends it if missing to prevent secret leaks to version control.
 - 🧪 **Safe `--dry-run` Mode**: Previews all detected secrets, proposed code replacements, and file actions without altering files on disk.
 - ⚙️ **Project Configuration (`.secretsentry.toml`)**: Tune entropy thresholds, allowlist known test dummy secrets, ignore specific directories or files, and configure `.env` generation.
 - 🎨 **ANSI Terminal Formatting**: Clean, colorized findings and banners with automatic Windows VT100 support and `--no-color` / `NO_COLOR` compliance.
-- 🛠️ **Integrated Self-Test**: 53-assertion end-to-end sandbox test suite verifiable directly from the CLI via `--self-test`.
+- 🛠️ **Integrated Self-Test**: 78-assertion end-to-end sandbox test suite verifiable directly from the CLI via `--self-test`.
 
 ---
 
@@ -169,7 +174,7 @@ flowchart TD
     F --> G["Append to .env (Mutex Protected)"]
     F --> H["Generate / Update .env.example"]
     F --> I["Ensure .env in .gitignore"]
-    F --> J["Atomic Rewrite Source Code (Rust, Python, JS/TS)"]
+    F --> J["Atomic Rewrite Source Code (Rust, Python, JS/TS, Go, Java, C#, PHP, Ruby)"]
 ```
 
 ---
